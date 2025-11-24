@@ -2,86 +2,12 @@
 import { useState, useEffect } from 'react';
 import { usePrivy, useWallets } from '@privy-io/react-auth';
 import { createPublicClient, createWalletClient, custom, http, parseEther, formatEther } from 'viem';
-import Game from './Game';
+import Game from './Game.jsx';
+import { CONTRACT_ADDRESS, CONTRACT_ABI } from './abi.js';
 
-// --- 1. CONTRACT CONFIGURATION ---
-// The Contract you deployed on Abstract Testnet
-const CONTRACT_ADDRESS = "0x27D53d1c60Ea8c8dc95B398dB98549536aA36F9E";
+// --- CONFIGURATION ---
+const BACKEND_API_URL = "http://localhost:3000/api/submit-score"; 
 
-const CONTRACT_ABI = [
-	{
-		"inputs": [],
-		"stateMutability": "nonpayable",
-		"type": "constructor"
-	},
-	{
-		"anonymous": false,
-		"inputs": [
-			{
-				"indexed": true,
-				"internalType": "address",
-				"name": "player",
-				"type": "address"
-			},
-			{
-				"indexed": false,
-				"internalType": "uint256",
-				"name": "count",
-				"type": "uint256"
-			}
-		],
-		"name": "TicketsBought",
-		"type": "event"
-	},
-	{
-		"inputs": [
-			{
-				"internalType": "uint256",
-				"name": "count",
-				"type": "uint256"
-			}
-		],
-		"name": "buy_tickets",
-		"outputs": [],
-		"stateMutability": "payable",
-		"type": "function"
-	},
-	{
-		"inputs": [
-			{
-				"internalType": "address",
-				"name": "player",
-				"type": "address"
-			}
-		],
-		"name": "get_game_state",
-		"outputs": [
-			{ "internalType": "uint256", "name": "", "type": "uint256" }, // Pot
-			{ "internalType": "uint256", "name": "", "type": "uint256" }, // HighScore
-			{ "internalType": "address", "name": "", "type": "address" }, // King
-			{ "internalType": "uint256", "name": "", "type": "uint256" }, // EndTime
-			{ "internalType": "uint256", "name": "", "type": "uint256" }, // Tickets
-			{ "internalType": "uint256", "name": "", "type": "uint256" }  // XP
-		],
-		"stateMutability": "view",
-		"type": "function"
-	},
-	{
-		"inputs": [
-			{
-				"internalType": "uint256",
-				"name": "score",
-				"type": "uint256"
-			}
-		],
-		"name": "play_round",
-		"outputs": [],
-		"stateMutability": "nonpayable",
-		"type": "function"
-	}
-];
-
-// --- 2. CHAIN CONFIGURATION ---
 const abstractChain = {
   id: 11124,
   name: 'Abstract Testnet',
@@ -91,51 +17,49 @@ const abstractChain = {
 };
 
 function App() {
-  // --- 3. HOOKS & STATE ---
+  // --- HOOKS ---
   const { login, authenticated, user, logout } = usePrivy();
   const { wallets } = useWallets();
   
+  // --- STATE ---
   const [potSize, setPotSize] = useState("0");
   const [highScore, setHighScore] = useState("0");
   const [king, setKing] = useState("0x00...00");
-  const [tickets, setTickets] = useState(0);
-  const [xp, setXp] = useState(0);
+  const [credits, setCredits] = useState(0);
+  const [targetScore, setTargetScore] = useState(0);
   
-  // Ticket Shop State
   const [buyAmount, setBuyAmount] = useState(5);
-  
-  // Game State
   const [isGameActive, setIsGameActive] = useState(false);
   const [isWriting, setIsWriting] = useState(false);
 
-  // --- 4. HELPER: FETCH DATA ---
+  // --- LOGIC ---
   const fetchGameState = async () => {
     try {
       const publicClient = createPublicClient({ chain: abstractChain, transport: http() });
-      // If logged in, use user address. If not, use a zero address just to read global stats.
       const playerAddress = user?.wallet?.address || "0x0000000000000000000000000000000000000000";
       
-      const data = await publicClient.readContract({
-        address: CONTRACT_ADDRESS, abi: CONTRACT_ABI, functionName: 'get_game_state',
-        args: [playerAddress]
-      });
+      const [pot, hs, k, target, creds] = await Promise.all([
+        publicClient.readContract({ address: CONTRACT_ADDRESS, abi: CONTRACT_ABI, functionName: 'pot' }),
+        publicClient.readContract({ address: CONTRACT_ADDRESS, abi: CONTRACT_ABI, functionName: 'currentHighScore' }),
+        publicClient.readContract({ address: CONTRACT_ADDRESS, abi: CONTRACT_ABI, functionName: 'currentKing' }),
+        publicClient.readContract({ address: CONTRACT_ADDRESS, abi: CONTRACT_ABI, functionName: 'targetScore' }),
+        publicClient.readContract({ address: CONTRACT_ADDRESS, abi: CONTRACT_ABI, functionName: 'credits', args: [playerAddress] })
+      ]);
 
-      setPotSize(formatEther(data[0]));
-      setHighScore(data[1].toString());
-      setKing(data[2]);
-      setTickets(Number(data[4])); // Ticket Balance
-      setXp(Number(data[5]));      // XP Balance
+      setPotSize(formatEther(pot));
+      setHighScore(hs.toString());
+      setKing(k);
+      setTargetScore(Number(target));
+      setCredits(Number(creds));
     } catch (error) { console.error("Read Error:", error); }
   };
 
-  // Auto-fetch every 5 seconds
   useEffect(() => {
     fetchGameState();
     const interval = setInterval(fetchGameState, 5000);
     return () => clearInterval(interval);
   }, [user]);
 
-  // --- 5. HELPER: GET SIGNER ---
   const getSigner = async () => {
     const wallet = wallets[0];
     if (!wallet) throw new Error("No wallet connected");
@@ -144,27 +68,24 @@ function App() {
     return createWalletClient({ account: wallet.address, chain: abstractChain, transport: custom(provider) });
   };
 
-  // --- 6. ACTION: BUY TICKETS ---
-  const handleBuyTickets = async () => {
+  const handleBuyCredits = async () => {
     try {
       setIsWriting(true);
       const client = await getSigner();
       const [address] = await client.getAddresses();
-      
-      // Calculate Price: 0.0001 ETH per ticket
-      const costString = (buyAmount * 0.0001).toFixed(4).toString();
+      const costString = (buyAmount * 0.00001).toFixed(5).toString();
 
       await client.writeContract({
-        address: CONTRACT_ADDRESS, abi: CONTRACT_ABI, functionName: 'buy_tickets',
+        address: CONTRACT_ADDRESS, 
+        abi: CONTRACT_ABI, 
+        functionName: 'buyCredits',
         account: address, 
-        args: [BigInt(buyAmount)], 
         value: parseEther(costString),
-        gas: BigInt(500000) // Force gas limit to prevent estimation errors
       });
       
-      alert(`Success! Purchased ${buyAmount} Tickets.`);
+      alert(`Success! Purchased ${buyAmount} Credits.`);
       setIsWriting(false);
-      fetchGameState(); // Refresh UI
+      fetchGameState(); 
     } catch (error) {
       console.error(error);
       setIsWriting(false);
@@ -172,124 +93,174 @@ function App() {
     }
   };
 
-  // --- 7. ACTION: START GAME ---
-  const handleStartGame = () => {
-    if (tickets > 0) {
-        setIsGameActive(true); // Show the Iframe
-    } else {
-        alert("No Tickets! Buy some to enter.");
+  const handleClaimPot = async () => {
+    try {
+      setIsWriting(true);
+      const client = await getSigner();
+      const [address] = await client.getAddresses();
+      
+      await client.writeContract({
+        address: CONTRACT_ADDRESS, 
+        abi: CONTRACT_ABI, 
+        functionName: 'claimPot',
+        account: address
+      });
+      
+      alert("POT CLAIMED! CONGRATULATIONS!");
+      setIsWriting(false);
+      fetchGameState();
+    } catch (error) {
+      setIsWriting(false);
+      alert("Claim Failed: " + (error.shortMessage || error.message));
     }
   };
 
-  // --- 8. ACTION: GAME OVER ---
-  const handleGameOver = async (score) => {
-    // Close the game window
-    setIsGameActive(false);
-    if (score === 0) return;
-    
-    // 1. Update UI Locally (Optimistic)
-    setTickets(prev => Math.max(0, prev - 1));
-    alert(`Game Over! Score: ${score}. \n(Ticket deducted locally. Score sent to server.)`);
-    
-    // 2. Submit to Blockchain (Silent / Optional for now to prevent popup spam)
-    /* // UNCOMMENT THIS BLOCK WHEN YOU WANT REAL TRANSACTIONS ON LOSS
-    try {
-      const client = await getSigner();
-      const [address] = await client.getAddresses();
-      await client.writeContract({
-        address: CONTRACT_ADDRESS, abi: CONTRACT_ABI, functionName: 'play_round',
-        account: address, args: [BigInt(score)]
-      });
-      fetchGameState();
-    } catch (error) { console.error("Score Submit Error", error); }
-    */
+  const handleStartGame = () => {
+    if (credits > 0) {
+        setIsGameActive(true); 
+    } else {
+        alert("No Credits! Buy some to enter.");
+    }
   };
 
-  // Helper for dropdown
-  const ticketOptions = Array.from({length: 50}, (_, i) => i + 1);
+  const handleGameOver = async (score, biometrics) => {
+    setIsGameActive(false);
+    if (score === 0 || !biometrics) return;
+    setCredits(prev => Math.max(0, prev - 1));
 
-  // --- 9. RENDER ---
+    try {
+        setIsWriting(true);
+        const wallet = wallets[0];
+        const response = await fetch(BACKEND_API_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                userAddress: wallet.address,
+                gameData: { score, duration: biometrics.duration, clickOffsets: biometrics.clickOffsets }
+            })
+        });
+
+        const data = await response.json();
+        if (!data.success) throw new Error("Security Check Failed: " + data.message);
+
+        const client = await getSigner();
+        await client.writeContract({
+            address: CONTRACT_ADDRESS, 
+            abi: CONTRACT_ABI, 
+            functionName: 'submitScore',
+            account: wallet.address, 
+            args: [BigInt(score), data.signature]
+        });
+
+        alert("Score Verified & Submitted to Chain!");
+        fetchGameState();
+    } catch (error) {
+        console.error("Submission Error", error);
+        alert("Error submitting score: " + error.message);
+    } finally {
+        setIsWriting(false);
+    }
+  };
+
+  // --- RENDER WITH SEMANTIC UI LABELS ---
   return (
-    <div className="app-container">
+    <div className="app-container ui-app-container">
       
       {/* TOP BAR */}
-      <div className="top-bar">
-        <div className="logo">STACK <span className="highlight">'EM</span></div>
-        <div className="ticker">
-           🎟 {tickets} &nbsp;|&nbsp; 
-           ⭐ {xp} XP &nbsp;|&nbsp;
-           💰 {potSize} ETH
+      <div className="top-bar ui-top-bar">
+        <div className="logo ui-logo">
+            STACK <span className="highlight ui-logo-highlight">ULTIMATE</span>
         </div>
+        
+        <div className="ticker ui-ticker">
+           <span className="ui-ticker-item ui-ticker-credits">🎟 {credits}</span>
+           <span className="ui-ticker-divider">&nbsp;|&nbsp;</span> 
+           <span className="ui-ticker-item ui-ticker-target">🎯 TARGET: {targetScore}</span>
+           <span className="ui-ticker-divider">&nbsp;|&nbsp;</span>
+           <span className="ui-ticker-item ui-ticker-pot">💰 {potSize} ETH</span>
+        </div>
+
         {authenticated ? (
-          <button onClick={logout} className="connect-btn">{user?.wallet?.address.substring(0,6)}... (LOGOUT)</button>
+          <button onClick={logout} className="connect-btn ui-btn-logout">
+            {user?.wallet?.address.substring(0,6)}... (LOGOUT)
+          </button>
         ) : (
-          <button onClick={login} className="connect-btn">LOGIN</button>
+          <button onClick={login} className="connect-btn ui-btn-login">
+            LOGIN
+          </button>
         )}
       </div>
 
       {/* MAIN ARENA */}
-      <div className="arena">
+      <div className="arena ui-arena">
         {!authenticated ? (
           // STATE: LOGGED OUT
-          <div className="welcome-card">
-            <h1>PROOF OF SKILL</h1>
-            <p>Login to Play</p>
-            <button onClick={login} className="play-btn">LOGIN</button>
+          <div className="welcome-card ui-card-welcome">
+            <h1 className="ui-welcome-title">PROOF OF SKILL</h1>
+            <p className="ui-welcome-subtitle">Login to Play</p>
+            <button onClick={login} className="play-btn ui-btn-hero-login">LOGIN</button>
           </div>
         ) : (
           <>
             {/* STATE: LOBBY */}
             {!isGameActive ? (
-              <div className="lobby-card">
-                <div className="stats-row">
-                  <div className="stat-box"><div className="label">POT</div><div className="value glow-green">{potSize} ETH</div></div>
-                  <div className="stat-box"><div className="label">KING (48h)</div><div className="value">{highScore}</div></div>
+              <div className="lobby-card ui-card-lobby">
+                
+                <div className="stats-row ui-stats-row">
+                  <div className="stat-box ui-stat-box ui-stat-pot">
+                    <div className="label ui-label">POT</div>
+                    <div className="value glow-green ui-value ui-value-pot">{potSize} ETH</div>
+                  </div>
+                  <div className="stat-box ui-stat-box ui-stat-highscore">
+                    <div className="label ui-label">HIGH SCORE</div>
+                    <div className="value ui-value ui-value-highscore">{highScore}</div>
+                  </div>
                 </div>
 
-                <div className="xp-bar">
-                    <div className="xp-fill" style={{width: `${(xp % 1000) / 10}%`}}></div>
-                    <span className="xp-text">Level {Math.floor(xp / 1000) + 1}</span>
-                </div>
-
-                {tickets > 0 ? (
-                    <div className="action-area">
-                        <button className="play-btn" onClick={handleStartGame}>
-                          PLAY NOW ({tickets})
+                {/* KING STATUS SECTION */}
+                {king.toLowerCase() === user?.wallet?.address.toLowerCase() && Number(highScore) > targetScore ? (
+                    <div className="king-status ui-section-king-active" style={{marginBottom: '15px', padding: '10px', border: '1px solid gold', borderRadius: '8px'}}>
+                        <h3 className="ui-text-king-title" style={{color: 'gold', margin: '5px 0'}}>👑 YOU ARE THE KING! 👑</h3>
+                        <p className="ui-text-king-subtitle" style={{fontSize: '12px', color: '#aaa'}}>Wait for 48h or challenge to end</p>
+                        <button className="buy-btn ui-btn-claim" style={{background: 'gold', color: 'black', marginTop: '10px'}} onClick={handleClaimPot} disabled={isWriting}>
+                            {isWriting ? "CLAIMING..." : "CLAIM POT NOW"}
                         </button>
-                        <div className="divider">OR BUY MORE</div>
+                    </div>
+                ) : (
+                    <div className="king-display ui-section-king-passive">
+                        Current King: <span className="ui-text-king-address">{king.substring(0,8)}...</span>
+                    </div>
+                )}
+
+                <div className="divider ui-divider"></div>
+
+                {/* PLAY BUTTON AREA */}
+                {credits > 0 ? (
+                    <div className="action-area ui-action-area">
+                        <button className="play-btn ui-btn-play" onClick={handleStartGame}>
+                          PLAY NOW ({credits})
+                        </button>
                     </div>
                 ) : null}
 
-                {/* TICKET SHOP */}
-                <div className="ticket-shop">
-                    <div className="ticket-controls">
-                        <button className="control-btn" onClick={() => setBuyAmount(Math.max(1, buyAmount - 1))}>-</button>
+                {/* TICKET SHOP AREA */}
+                <div className="ticket-shop ui-section-shop">
+                    <div className="ticket-controls ui-shop-controls">
+                        <button className="control-btn ui-btn-shop-minus" onClick={() => setBuyAmount(Math.max(1, buyAmount - 1))}>-</button>
                         <input 
                             type="number" 
-                            className="ticket-input" 
+                            className="ticket-input ui-input-shop-amount" 
                             value={buyAmount} 
-                            onChange={(e) => setBuyAmount(Number(e.target.value))}
+                            onChange={(e) => setBuyAmount(Number(e.target.value))} 
                             min="1" max="50"
                         />
-                        <button className="control-btn" onClick={() => setBuyAmount(Math.min(50, buyAmount + 1))}>+</button>
+                        <button className="control-btn ui-btn-shop-plus" onClick={() => setBuyAmount(Math.min(50, buyAmount + 1))}>+</button>
                     </div>
                     
-                    <select 
-                        className="ticket-dropdown"
-                        value={buyAmount} 
-                        onChange={(e) => setBuyAmount(Number(e.target.value))}
-                    >
-                        {ticketOptions.map(num => (
-                            <option key={num} value={num}>{num} Tickets</option>
-                        ))}
-                    </select>
-
-                    <button className="buy-btn" onClick={handleBuyTickets} disabled={isWriting}>
-                       {isWriting ? "CONFIRMING..." : `BUY FOR ${(buyAmount * 0.0001).toFixed(4)} ETH`}
+                    <button className="buy-btn ui-btn-buy" onClick={handleBuyCredits} disabled={isWriting}>
+                       {isWriting ? "CONFIRMING..." : `BUY CREDITS ${(buyAmount * 0.00001).toFixed(5)} ETH`}
                     </button>
                 </div>
-                
-                <div className="king-display">King: {king.substring(0,8)}...</div>
               </div>
             ) : (
               // STATE: PLAYING GAME

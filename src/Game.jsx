@@ -6,8 +6,10 @@ const Game = ({ gameActive, onGameOver }) => {
   useEffect(() => {
     const handleMessage = (event) => {
       if (event.data && event.data.type === "GAME_OVER") {
-        console.log("Game over received via Bridge. Score:", event.data.score);
-        onGameOver(event.data.score);
+        // SENTINEL: Extract biometrics
+        const { score, biometrics } = event.data;
+        console.log("Game Over. Evidence captured:", biometrics);
+        onGameOver(score, biometrics);
       }
     };
 
@@ -41,7 +43,7 @@ const Game = ({ gameActive, onGameOver }) => {
         scrolling="no"
       />
        <button 
-        onClick={() => onGameOver(0)} // Manual Exit
+        onClick={() => onGameOver(0, null)} // Manual Exit
         style={{
             position:'absolute', top: 20, right: 20, 
             padding: '10px 20px', background:'red', color:'white', 

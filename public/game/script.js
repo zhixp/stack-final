@@ -7,9 +7,13 @@ let lastTime;
 let stack;
 let overhangs;
 
-// --- VISUAL TUNING (THE "SLAB" LOOK) ---
-const boxHeight = 0.8; // Reduced by 20% (Sleeker)
-const originalBoxSize = 4; // Increased by ~30% (Wider base)
+// --- SENTINEL: BIOMETRIC DATA ---
+let clickOffsets = []; // Stores the accuracy of every click
+let startTime = 0;     // Tracks game duration
+
+// --- VISUAL TUNING ---
+const boxHeight = 0.8; 
+const originalBoxSize = 4; 
 
 let autoplay = false;
 let gameEnded;
@@ -32,7 +36,11 @@ function init() {
   lastTime = 0;
   stack = [];
   overhangs = [];
-  hue = 200; // Start Blue
+  hue = 200; 
+  
+  // Sentinel Reset
+  clickOffsets = [];
+  startTime = 0;
 
   // 1. PHYSICS
   world = new CANNON.World();
@@ -42,7 +50,7 @@ function init() {
 
   // 2. CAMERA
   const aspect = window.innerWidth / window.innerHeight;
-  const width = 25; // Keep the wide zoom
+  const width = 25; 
   const height = width / aspect;
 
   camera = new THREE.OrthographicCamera(
@@ -53,8 +61,6 @@ function init() {
   camera.lookAt(0, 0, 0);
 
   scene = new THREE.Scene();
-  
-  // 3. BACKGROUND
   scene.background = new THREE.Color(`hsl(${hue}, 20%, 80%)`);
   
   addLayer(0, 0, originalBoxSize, originalBoxSize);
@@ -86,6 +92,10 @@ function startGame() {
   stack = [];
   overhangs = [];
   hue = 200; 
+  
+  // SENTINEL: Start Recording
+  clickOffsets = [];
+  startTime = Date.now();
 
   if (instructionsElement) instructionsElement.style.display = "none";
   if (scoreElement) scoreElement.innerText = 0;
@@ -131,9 +141,7 @@ function addOverhang(x, z, width, depth) {
 
 function generateBox(x, y, z, width, depth, falls) {
   const geometry = new THREE.BoxGeometry(width, boxHeight, depth);
-  
   const color = new THREE.Color(`hsl(${hue}, 70%, 60%)`);
-  
   const material = new THREE.MeshLambertMaterial({ color });
   const mesh = new THREE.Mesh(geometry, material);
   mesh.position.set(x, y, z);
@@ -189,7 +197,6 @@ function animation() {
               robotPrecision));
 
     if (boxShouldMove) {
-      // Sine Wave with adjusted Amplitude for wider blocks
       const movePos = Math.sin(Date.now() * 0.002) * 5; 
 
       if (topLayer.direction === 'x') {
@@ -201,7 +208,6 @@ function animation() {
       }
     } 
 
-    // Adjusted camera lerp for shorter blocks
     const targetY = boxHeight * (stack.length - 2) + 4;
     camera.position.y += (targetY - camera.position.y) * 0.1;
 
@@ -230,8 +236,18 @@ function missedTheSpot() {
   if (instructionsElement) instructionsElement.style.display = "flex";
   
   const finalScore = stack.length - 1; 
+  const duration = Date.now() - startTime;
+
   if (finalScore > 0) {
-      window.parent.postMessage({ type: "GAME_OVER", score: finalScore }, "*");
+      // SENTINEL: Send Score + Biometrics to React
+      window.parent.postMessage({ 
+          type: "GAME_OVER", 
+          score: finalScore,
+          biometrics: {
+              duration: duration,
+              clickOffsets: clickOffsets
+          }
+      }, "*");
   }
 }
 
@@ -248,6 +264,9 @@ function splitBlockAndAddNextOneIfOverlaps() {
   if (overlap > 0) {
     cutBox(topLayer, overlap, size, delta);
     
+    // SENTINEL: Record accuracy (The smaller the delta, the better)
+    clickOffsets.push(delta);
+
     hue += 4; 
     scene.background = new THREE.Color(`hsl(${hue}, 20%, 80%)`);
     if(scoreElement) scoreElement.style.color = `hsl(${hue}, 50%, 30%)`;
@@ -258,7 +277,6 @@ function splitBlockAndAddNextOneIfOverlaps() {
     const overhangWidth = direction == "x" ? overhangSize : topLayer.width;
     const overhangDepth = direction == "z" ? overhangSize : topLayer.depth;
     
-    // Spawn further away to account for larger blocks
     const nextX = direction == "x" ? topLayer.threejs.position.x : -15; 
     const nextZ = direction == "z" ? topLayer.threejs.position.z : -15;
     const newWidth = topLayer.width;
